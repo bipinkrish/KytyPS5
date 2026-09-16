@@ -14,21 +14,70 @@ static thread_local CommandScheduler* g_deferred_callback_scheduler = nullptr;
 
 namespace {
 
+static const char* DebugOpName(uint32_t op) {
+	switch (static_cast<CommandBufferDebugOp>(op)) {
+		case CommandBufferDebugOp::DispatchDirect: return "DispatchDirect";
+		case CommandBufferDebugOp::DrawIndex: return "DrawIndex";
+		case CommandBufferDebugOp::DrawIndexAuto: return "DrawIndexAuto";
+		case CommandBufferDebugOp::EopWrite: return "EopWrite";
+		case CommandBufferDebugOp::EopInterrupt: return "EopInterrupt";
+		case CommandBufferDebugOp::EopWriteBack: return "EopWriteBack";
+		case CommandBufferDebugOp::EopFlip: return "EopFlip";
+		case CommandBufferDebugOp::EopWriteBackFlip: return "EopWriteBackFlip";
+		case CommandBufferDebugOp::EopOnlyFlip: return "EopOnlyFlip";
+		default: return "Unknown";
+	}
+}
+
+struct SubmitRecord {
+	uint64_t tick;
+	uint32_t waits;
+	uint32_t signals;
+	uint32_t op;
+	uint64_t submit_id;
+	uint32_t arg0, arg1, arg2, arg3;
+	uint64_t arg4;
+	// TEMP-DIAG-WORKCOUNT: actual host work in the submit (see CommandBuffer).
+	uint32_t work_draws      = 0;
+	uint32_t work_dispatches = 0;
+	uint32_t work_copies     = 0;
+};
+static std::array<SubmitRecord, 512> g_recent_submits;
+static std::atomic<size_t>           g_recent_submits_count {0};
+
 void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint32_t debug_op,
                        uint64_t debug_submit, uint32_t arg0, uint32_t arg1, uint32_t arg2,
                        uint32_t arg3, uint64_t arg4) {
-	LOGF("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64
+	LOGF("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u (%s) debug_submit=%" PRIu64
 	     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
 	     what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
-	     debug_submit, arg0, arg1, arg2, arg3, arg4);
-	std::printf("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64
+	     DebugOpName(debug_op), debug_submit, arg0, arg1, arg2, arg3, arg4);
+	std::printf("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u (%s) debug_submit=%" PRIu64
 	            " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
 	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
-	            debug_submit, arg0, arg1, arg2, arg3, arg4);
+	            DebugOpName(debug_op), debug_submit, arg0, arg1, arg2, arg3, arg4);
 	std::fflush(stdout);
 }
 
 } // namespace
+
+void DumpRecentSubmits() {
+	size_t count   = g_recent_submits_count.load();
+	size_t to_dump = 80;
+	size_t start   = (count > to_dump) ? (count - to_dump) : 0;
+	std::printf("=== RECENT GPU SUBMITS (total: %zu, showing last %zu) ===\n", count,
+	            count - start);
+	for (size_t i = start; i < count; i++) {
+		const auto& rec = g_recent_submits[i % g_recent_submits.size()];
+		std::printf("Submit[%zu]: tick=%" PRIu64 " waits=%u signals=%u op=%u(%s) submit_id=%" PRIu64
+		            " args=(%u, %u, %u, %u, 0x%016" PRIx64
+		            ") work=(draws=%u dispatches=%u copies=%u)\n",
+		            i, rec.tick, rec.waits, rec.signals, rec.op, DebugOpName(rec.op), rec.submit_id,
+		            rec.arg0, rec.arg1, rec.arg2, rec.arg3, rec.arg4, rec.work_draws,
+		            rec.work_dispatches, rec.work_copies);
+	}
+	std::fflush(stdout);
+}
 
 CommandScheduler::CommandPool::CommandPool(GraphicContext& graphics, MasterSemaphore& master)
     : m_graphics(graphics), m_master(master) {
@@ -60,6 +109,12 @@ size_t CommandScheduler::CommandPool::Grow() {
 }
 
 vk::CommandBuffer CommandScheduler::CommandPool::Commit() {
+	// A recycled command buffer must be explicitly reset before vkBegin (the
+	// pool allows individual resets), and only once the GPU is done with it.
+	// The known tick is cached, so refresh first: reusing a buffer that is
+	// still in flight (or beginning one in executable state) wedges the queue
+	// with exactly the observed flaky one-behind stalls on both vendors.
+	m_master.Refresh();
 	auto       gpu_tick = m_master.KnownGpuTick();
 	const auto search   = [this, &gpu_tick](size_t begin, size_t end) -> std::optional<size_t> {
 		for (size_t index = begin; index < end; ++index) {
@@ -73,19 +128,19 @@ vk::CommandBuffer CommandScheduler::CommandPool::Commit() {
 
 	auto found = search(m_hint, m_ticks.size());
 	if (!found) {
-		m_master.Refresh();
-		gpu_tick = m_master.KnownGpuTick();
-		found    = search(m_hint, m_ticks.size());
-	}
-	if (!found) {
 		found = search(0, m_hint);
 	}
 	if (!found) {
 		found           = Grow();
 		m_ticks[*found] = m_master.CurrentTick();
+		// Freshly allocated buffers start in initial state; nothing to reset.
+		m_hint = (*found + 1) % m_ticks.size();
+		return m_buffers[*found];
 	}
 
 	m_hint = (*found + 1) % m_ticks.size();
+	EXIT_IF(VULKAN_HPP_DEFAULT_DISPATCHER.vkResetCommandBuffer(
+	            static_cast<VkCommandBuffer>(m_buffers[*found]), 0) != VK_SUCCESS);
 	return m_buffers[*found];
 }
 
@@ -345,7 +400,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
-	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
+	EXIT_IF(submit.num_wait_semaphores >= SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
 	m_command.End();
@@ -356,7 +411,6 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	vk::Result result;
 	uint64_t   tick;
 	{
-		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
 		submit.AddSignal(m_master.Handle(), tick);
 
@@ -377,6 +431,24 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
+	}
+
+	{
+		size_t idx          = g_recent_submits_count.fetch_add(1);
+		auto&  rec          = g_recent_submits[idx % g_recent_submits.size()];
+		rec.tick            = tick;
+		rec.waits           = submit.num_wait_semaphores;
+		rec.signals         = submit.num_signal_semaphores;
+		rec.op              = m_command.m_debug_op;
+		rec.submit_id       = m_command.m_debug_submit_id;
+		rec.arg0            = m_command.m_debug_arg0;
+		rec.arg1            = m_command.m_debug_arg1;
+		rec.arg2            = m_command.m_debug_arg2;
+		rec.arg3            = m_command.m_debug_arg3;
+		rec.arg4            = m_command.m_debug_arg4;
+		rec.work_draws      = m_command.WorkDraws();
+		rec.work_dispatches = m_command.WorkDispatches();
+		rec.work_copies     = m_command.WorkCopies();
 	}
 
 	if (result != vk::Result::eSuccess) {

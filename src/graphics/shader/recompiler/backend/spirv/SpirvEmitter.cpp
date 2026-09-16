@@ -80,9 +80,9 @@ void ValidateNativeProgram(const IR::Program& program) {
 	}
 	const bool uses_flattened_runtime =
 	    !program.srt_reads.empty() ||
-	     std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) {
-		     return image.indirect_search_iterations != 0u;
-	     });
+	    std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) {
+		    return image.indirect_search_iterations != 0u;
+	    });
 	if (uses_flattened_runtime) {
 		Expect(Kind::FlattenedSrt);
 	}
@@ -105,7 +105,7 @@ void ValidateNativeProgram(const IR::Program& program) {
 		}
 	}
 	const auto has_shader_data_storage = present[static_cast<size_t>(Kind::ShaderData)];
-	const auto shader_data_dwords = program.bindings.ShaderDataDwords();
+	const auto shader_data_dwords      = program.bindings.ShaderDataDwords();
 	if ((program.bindings.UsesPushData() &&
 	     !IR::PushData::CanFit(program.bindings.push_data_start_dword, shader_data_dwords)) ||
 	    program.bindings.memory_offset_dword != program.bindings.user_data_registers.size() ||
@@ -132,12 +132,24 @@ void ValidateNativeProgram(const IR::Program& program) {
 			              program.memory_info[index].planning_only;
 		       });
 	};
+	const auto dynamic_buffer_handle = [&](const IR::Inst& handle) {
+		return !handle.Uses().empty() &&
+		       std::ranges::any_of(handle.Uses(), [&](const IR::Use& use) {
+			       const auto op = use.user->GetOpcode();
+			       if (IR::BufferAccessOf(op) == IR::BufferAccess::None) {
+				       return false;
+			       }
+			       const auto index = use.user->Flags<IR::MemoryFlags>().index;
+			       return index < program.memory_info.size() &&
+			              program.memory_info[index].dynamic_buffer;
+		       });
+	};
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			const auto dense = inst.Flags<uint32_t>();
 			switch (inst.GetOpcode()) {
 				case IR::ValueOpcode::GetBufferResource:
-					if (planning_only_handle(inst)) {
+					if (planning_only_handle(inst) || dynamic_buffer_handle(inst)) {
 						break;
 					}
 					if (dense >= program.info.buffers.size()) {
@@ -213,6 +225,9 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 				}
 				const auto& memory = program.memory_info[memory_index];
 				if (memory.kind == IR::ResourceKind::Buffer) {
+					if (memory.dynamic_buffer) {
+						continue;
+					}
 					if (memory.resource >= program.info.buffers.size()) {
 						Fail(program, "buffer operation has invalid resource metadata");
 					}
@@ -289,8 +304,7 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					if (index >= program.export_info.size()) {
 						Fail(program, "attribute export has invalid metadata");
 					}
-					if (program.stage == ShaderType::Pixel &&
-					    program.export_info[index].vm) {
+					if (program.stage == ShaderType::Pixel && program.export_info[index].vm) {
 						requirements.pixel_valid_mask = true;
 					}
 					break;
@@ -302,8 +316,7 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 	return requirements;
 }
 
-std::vector<uint32_t> EmitProgram(const IR::Program& program,
-                                  ShaderStageInputInfo input_info) {
+std::vector<uint32_t> EmitProgram(const IR::Program& program, ShaderStageInputInfo input_info) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -319,7 +332,7 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	ValidateNativeProgram(program);
 	IR::ValidateProgram(program, true);
 	EmitterState state(program, input_info);
-	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
+	const auto*  workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u

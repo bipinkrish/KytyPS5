@@ -4874,6 +4874,35 @@ void TestNewShaderRecompilerImageQueryTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerBvhIntersectRay() {
+  // RDNA2 ray-tracing BVH traversal (MIMG 0xE6/0xE7) must decode and compile
+  // instead of aborting the shader. The backend stubs a guaranteed miss
+  // (all 0xFFFFFFFF) until real traversal is implemented.
+  const uint32_t shader[] = {
+      EncodeMimg0(0xe6, 0xf, false, 0) | (1u << 15u),
+      EncodeMimg1(1, 1, 0, 11), // image_bvh_intersect_ray v1, v11, s[4:7]
+      EncodeMimg0(0xe7, 0xf, false, 0) | (1u << 15u),
+      EncodeMimg1(5, 2, 0, 1), // image_bvh64_intersect_ray v5, v1, s[8:11]
+      0xbf810000u,
+  };
+
+  auto user_data = ImageTestUserData();
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+  options.user_data = user_data;
+
+  auto result = RecompileForTest(shader, options);
+  Check(Common::ContainsStr(result.decoded_dump, "IMAGE_BVH_INTERSECT_RAY"),
+        "BVH intersect ray (0xE6) did not decode");
+  Check(Common::ContainsStr(result.decoded_dump, "IMAGE_BVH64_INTERSECT_RAY"),
+        "BVH64 intersect ray (0xE7) did not decode");
+  Check(Common::ContainsStr(result.ir_dump, "ImageBvhIntersectRay"),
+        "BVH intersect did not lower to miss-stub IR");
+  Check(SpirvContainsOpcode(result.spirv, 80),
+        "BVH miss stub did not emit OpCompositeConstruct");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerCubeSampleCoordinates() {
   constexpr uint32_t MimgDimCube = 3;
   const uint32_t shader[] = {
@@ -13387,6 +13416,8 @@ int main() {
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
+  TestNewShaderRecompilerBvhIntersectRay();
+
 
   return 0;
 }

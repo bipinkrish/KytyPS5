@@ -279,10 +279,17 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
                                 MaterializedSnapshot& snapshot) {
 	if (!program.resource_tracking_complete) {
+		std::printf("MATFAIL-SNAP: resource_tracking_complete is false (hash=0x%016llx)\n",
+		            static_cast<unsigned long long>(program.shader_hash));
+		std::fflush(stdout);
 		return false;
 	}
 
 	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
+		std::printf("MATFAIL-SNAP: requires_specialization_memory is true but "
+		            "read_specialization_memory is null (hash=0x%016llx)\n",
+		            static_cast<unsigned long long>(program.shader_hash));
+		std::fflush(stdout);
 		return false;
 	}
 	std::vector<DescriptorValue> values;
@@ -290,6 +297,9 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 	std::vector<uint8_t>         active_sources;
 	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
 	                            flattened_srt, program.clean_flat_slots, active_sources)) {
+		std::printf("MATFAIL-SNAP: EvaluateRuntimeSources failed (hash=0x%016llx)\n",
+		            static_cast<unsigned long long>(program.shader_hash));
+		std::fflush(stdout);
 		return false;
 	}
 
@@ -510,8 +520,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 			    fmt::format("atomic image descriptor {} uses unsupported format {}", i,
 			                static_cast<uint32_t>(format)));
 		}
-		const bool storage      = base.resource_class == ImageResourceClass::Storage;
-		image.fmask             = Prospero::IsFmaskTextureFormat(format);
+		const bool storage = base.resource_class == ImageResourceClass::Storage;
+		image.fmask        = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
 			if (storage || base.depth_compare ||
 			    image.indirect_root != ImageResource::NoIndirectImage ||
@@ -697,7 +707,7 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 				continue;
 			}
 			const auto& memory = program.memory_info.at(inst.Flags<MemoryFlags>().index);
-			if (memory.planning_only) {
+			if (memory.planning_only || memory.dynamic_buffer) {
 				continue;
 			}
 			if (buffer != BufferAccess::None) {
@@ -723,7 +733,7 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 // Nonnegative affine coefficients for constant, local and workgroup coordinates. Reject modular
 // arithmetic that could wrap; runtime coverage also bounds the largest invocation index.
 static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t axis,
-                                                      uint32_t depth = 0) {
+                                                        uint32_t depth = 0) {
 	value = value.Resolve();
 	if (depth > 32 || value.GetType() != Type::U32) {
 		return {};
@@ -801,7 +811,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 	for (const auto& buffer: program.info.buffers) {
 		if (buffer.read && (!buffer.scalar || buffer.written)) return {};
 	}
-	const auto& memory = program.memory_info.at(store->Flags<MemoryFlags>().index);
+	const auto&     memory = program.memory_info.at(store->Flags<MemoryFlags>().index);
 	UniformFillPlan result;
 	result.fill.resource = memory.resource;
 	Value data;
@@ -809,7 +819,8 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		if (program.info.images.size() != 1 || memory.dmask != 1 || memory.data_bits != 32 ||
 		    memory.image_has_mip || memory.image_sample_flags != 0 || memory.image_r128 ||
 		    memory.image_dimension != Decoder::ImageDimension::Dim2DArray ||
-		    store->Arg(3).Resolve() != Value(true)) return {};
+		    store->Arg(3).Resolve() != Value(true))
+			return {};
 		const auto& image = program.info.images[memory.resource];
 		if (image.read || image.atomic || image.mip_mode != ImageMipMode::None) return {};
 		const auto* address = store->Arg(1).ResolveInstruction();
@@ -829,7 +840,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 			return {};
 		result.fill.kind  = UniformFillKind::Image;
 		result.fill.words = 1;
-		data = values->Arg(0);
+		data              = values->Arg(0);
 	} else {
 		if (!program.info.images.empty()) return {};
 		const auto           op = store->GetOpcode();
@@ -839,18 +850,18 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		if (store_op == stores.end() || store->Arg(2).Resolve() != Value(0u) ||
 		    store->Arg(3).Resolve() != Value(0u) || store->Arg(5).Resolve() != Value(true))
 			return {};
-		if (!memory.formatted || memory.typed || !memory.idxen || memory.offen || memory.offset != 0 ||
-		    memory.data_bits != 32 ||
+		if (!memory.formatted || memory.typed || !memory.idxen || memory.offen ||
+		    memory.offset != 0 || memory.data_bits != 32 ||
 		    memory.data_dwords != static_cast<uint32_t>(store_op - stores.begin() + 1))
 			return {};
 		const auto address = FillIndex(store->Arg(1), 0);
 		if (!address || (*address)[0] != 0 || (*address)[1] != 1 || (*address)[2] == 0) return {};
-		result.fill.kind = UniformFillKind::Buffer;
+		result.fill.kind            = UniformFillKind::Buffer;
 		result.fill.group_stride[0] = static_cast<uint32_t>((*address)[2]);
-		result.fill.words = memory.data_dwords;
-		data = store->Arg(4);
+		result.fill.words           = memory.data_dwords;
+		data                        = store->Arg(4);
 	}
-	data = data.Resolve();
+	data                        = data.Resolve();
 	const auto*          vector = data.TryInstruction();
 	constexpr std::array composites {ValueOpcode::CompositeConstructU32x2,
 	                                 ValueOpcode::CompositeConstructU32x3,
@@ -964,10 +975,37 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	MaterializedSnapshot materialized;
+	// TEMP-DIAG-MATFAIL: split phases to locate soft failure.
 	if (!MaterializeSnapshot(program, runtime, materialized)) {
+		std::printf("MATFAIL-PHASE: MaterializeSnapshot failed (stage=%d hash=0x%016llx images=%zu "
+		            "buffers=%zu samplers=%zu uses_dma=%d)\n",
+		            static_cast<int>(program.stage),
+		            static_cast<unsigned long long>(program.shader_hash),
+		            program.info.images.size(), program.info.buffers.size(),
+		            program.info.samplers.size(), program.info.uses_dma ? 1 : 0);
+		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+			const auto& b = program.info.buffers[i];
+			std::printf("MATFAIL-BUF: idx=%u source=%u first_pc=0x%x extent=0x%x r=%d w=%d a=%d "
+			            "f=%d s=%d fmt=%u\n",
+			            i, b.source, b.first_use_pc, b.max_byte_extent, b.read ? 1 : 0,
+			            b.written ? 1 : 0, b.atomic ? 1 : 0, b.formatted ? 1 : 0, b.scalar ? 1 : 0,
+			            static_cast<uint32_t>(b.descriptor_format));
+		}
+		for (uint32_t i = 0; i < program.memory_info.size(); i++) {
+			const auto& m = program.memory_info[i];
+			if (m.dynamic_buffer) {
+				std::printf("MATFAIL-MEM: idx=%u dynamic_buffer=1 dwords=%u\n", i, m.data_dwords);
+			}
+		}
+		std::fflush(stdout);
 		return false;
 	}
-	return BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization);
+	if (!BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization)) {
+		std::printf("MATFAIL-PHASE: BuildResourceSpecialization failed\n");
+		std::fflush(stdout);
+		return false;
+	}
+	return true;
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
@@ -1037,11 +1075,11 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		samplers[pair.sampler].depth_compare |= images[pair.image].depth_compare;
 	}
 
-	auto memory_info = program.memory_info;
+	auto             memory_info = program.memory_info;
 	const ImageRemap image_remap(specialization);
 	for (auto* block: program.blocks) {
 		for (auto it = block->begin(); it != block->end(); ++it) {
-			auto& inst = *it;
+			auto&      inst         = *it;
 			const auto image_opcode = ImageOpcodeInfoOf(inst.GetOpcode());
 			if (image_opcode.access == ImageAccess::None) {
 				continue;
@@ -1055,16 +1093,17 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 				EXIT_IF(inst.GetOpcode() != ValueOpcode::ImageRead || memory.data_bits != 32u);
 				// Vulkan MSAA stores each sample directly; FMASK's four-bit fragment indices
 				// therefore map each coverage sample to the same host sample.
-				constexpr uint32_t indices[] = {0x76543210u, 0xfedcba98u};
+				constexpr uint32_t   indices[] = {0x76543210u, 0xfedcba98u};
 				std::array<Value, 2> fragments;
 				for (uint32_t component = 0; component < fragments.size(); component++) {
-					const auto selected = block->PrependNewInst(
-					    it, ValueOpcode::SelectU32, {inst.Arg(2), Value(indices[component]), Value(0u)});
+					const auto selected =
+					    block->PrependNewInst(it, ValueOpcode::SelectU32,
+					                          {inst.Arg(2), Value(indices[component]), Value(0u)});
 					fragments[component] = Value(&*selected);
 				}
-				const auto result = block->PrependNewInst(
-				    it, ValueOpcode::CompositeConstructU32x4,
-				    {fragments[0], fragments[1], Value(0u), Value(0u)});
+				const auto result =
+				    block->PrependNewInst(it, ValueOpcode::CompositeConstructU32x4,
+				                          {fragments[0], fragments[1], Value(0u), Value(0u)});
 				inst.ReplaceUsesWith(Value(&*result));
 				continue;
 			}
@@ -1086,7 +1125,9 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 	}
 	for (auto& memory: memory_info) {
 		if (memory.kind == ResourceKind::Image && !memory.planning_only) {
-			memory.resource = image_remap.indices.at(memory.resource);
+			if (memory.resource < image_remap.indices.size()) {
+				memory.resource = image_remap.indices.at(memory.resource);
+			}
 		}
 	}
 	for (auto& buffer: buffers) {

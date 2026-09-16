@@ -342,8 +342,26 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
-		SuspendPm4();
+	// TEMP-DIAG-WAITMAP: log mailbox waits (pass vs suspend) to test whether
+	// EOP writes and WAITs observe the same guest memory (mapping split hangs
+	// the GPU idle while the game spins).
+	{
+		static std::atomic<uint64_t> wait_log_count {0};
+		const uint64_t               n = wait_log_count.fetch_add(1);
+		if (n < 40 || (n % 2000u) == 0u) {
+			const bool pass = TestWaitRegMemValue(*addr, ref, mask, func);
+			std::printf("WAITMAP: %s addr=%p val=0x%llx ref=0x%llx mask=0x%llx func=%u\n",
+			            pass ? "pass" : "SUSPEND", static_cast<const void*>(addr),
+			            static_cast<unsigned long long>(*addr),
+			            static_cast<unsigned long long>(ref), static_cast<unsigned long long>(mask),
+			            func);
+			std::fflush(stdout);
+			if (!pass) {
+				SuspendPm4();
+			}
+		} else if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+			SuspendPm4();
+		}
 	}
 }
 
@@ -560,7 +578,7 @@ void GuestGpu::ThreadRun(void* data) {
 
 bool GuestGpu::Process(Submission& submission) {
 	const bool first_slice = !submission.started;
-	auto& cp = GetProcessor(submission.queue_id);
+	auto&      cp          = GetProcessor(submission.queue_id);
 
 	if (first_slice && submission.reset_processor) {
 		cp.Reset();

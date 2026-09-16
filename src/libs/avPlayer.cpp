@@ -38,6 +38,14 @@ namespace Libs::Audio::AvPlayer {
 
 LIB_NAME("AvPlayer", "AvPlayer");
 
+// TEMP-DIAG-VIDEOGATE: counts videos that played to completion so render
+// diagnostics can distinguish boot-video presentation quads (must execute)
+// from post-video draws. Remove with the diagnostic skip in renderDraw.cpp.
+static std::atomic<uint32_t> g_video_stop_count {0};
+uint32_t                     AvPlayerVideoStopCount() {
+	return g_video_stop_count.load(std::memory_order_acquire);
+}
+
 using AvPlayerAllocate          = KYTY_SYSV_ABI void* (*)(void*, uint32_t, uint32_t);
 using AvPlayerDeallocate        = KYTY_SYSV_ABI void (*)(void*, void*);
 using AvPlayerAllocateTexture   = KYTY_SYSV_ABI void* (*)(void*, uint32_t, uint32_t);
@@ -552,7 +560,7 @@ private:
 struct ReadyFrame {
 	std::unique_ptr<GuestBuffer> buffer;
 	AvPlayerFrameInfoEx          info {};
-	uint64_t                    timestamp_offset = 0;
+	uint64_t                     timestamp_offset = 0;
 };
 
 class FileStreamer {
@@ -821,6 +829,7 @@ public:
 		}
 		if (was_playing_video) {
 			::printf("AvPlayer video stopped\n");
+			g_video_stop_count.fetch_add(1, std::memory_order_release);
 		}
 		return 0;
 	}
@@ -1636,10 +1645,10 @@ private:
 	bool                                     paused                   = false;
 	bool                                     seek_video_frame_pending = false;
 	std::atomic_bool                         loop {false};
-	int32_t                                  trick_speed   = AVPLAYER_TRICK_SPEED_NORMAL;
-	uint32_t                                 sync_mode     = 0;
-	uint64_t                                 start_time_ms = 0;
-	uint64_t                                 last_audio_ts = 0;
+	int32_t                                  trick_speed             = AVPLAYER_TRICK_SPEED_NORMAL;
+	uint32_t                                 sync_mode               = 0;
+	uint64_t                                 start_time_ms           = 0;
+	uint64_t                                 last_audio_ts           = 0;
 	uint64_t                                 last_output_loop_offset = 0;
 	uint32_t                                 pending_loop_warnings   = 0;
 	std::chrono::steady_clock::time_point    clock_start {};

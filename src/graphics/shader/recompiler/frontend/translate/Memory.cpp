@@ -1,5 +1,5 @@
-#include "graphics/shader/recompiler/frontend/translate/Translator.h"
 #include "graphics/shader/recompiler/frontend/decode/ImageOps.h"
+#include "graphics/shader/recompiler/frontend/translate/Translator.h"
 
 #include <algorithm>
 #include <array>
@@ -86,7 +86,7 @@ ResourceKind MemoryKind(const Decoder::Instruction& decoded) {
 	switch (decoded.family) {
 		case Decoder::Family::SMEM:
 			return IsScalarAddressLoad(decoded.opcode) ? ResourceKind::ScalarAddress
-			                                          : ResourceKind::ScalarBuffer;
+			                                           : ResourceKind::ScalarBuffer;
 		case Decoder::Family::MUBUF:
 		case Decoder::Family::MTBUF: return ResourceKind::Buffer;
 		case Decoder::Family::FLAT: return FlatSegmentResourceKind(decoded.memory_segment);
@@ -122,6 +122,7 @@ IR::MemoryInfo MemoryInfoFromDecoded(const Decoder::Instruction& decoded) {
 	memory.image_r128    = decoded.image_r128;
 	memory.idxen         = decoded.idxen;
 	memory.offen         = decoded.offen;
+	memory.glc           = decoded.glc;
 	memory.resource      = ResourceIndexFromOperand(decoded.src1);
 	memory.sampler       = ResourceIndexFromOperand(decoded.src2);
 	if (memory.kind == ResourceKind::ScalarBuffer) {
@@ -144,7 +145,6 @@ IR::MemoryInfo MemoryInfoFromDecoded(const Decoder::Instruction& decoded) {
 	}
 	return memory;
 }
-
 
 bool IsScalarBufferLoad(Decoder::Opcode opcode) {
 	switch (opcode) {
@@ -287,8 +287,7 @@ Translator::AddressOperands Translator::ReadAddressOperands(const Decoder::Instr
 		    high_or_base.kind != Decoder::OperandKind::Vgpr ? ReadU32(high_or_base) : low;
 		return {ir.Emit(IR::ValueOpcode::GetScratchResource), offset, IR::Value(0u)};
 	}
-	if (kind == IR::ResourceKind::Global &&
-	    high_or_base.kind != Decoder::OperandKind::Vgpr) {
+	if (kind == IR::ResourceKind::Global && high_or_base.kind != Decoder::OperandKind::Vgpr) {
 		const auto base_low  = ReadU32(high_or_base);
 		const auto base_high = ReadU32(OffsetOperand(high_or_base, 1u));
 		return {GetAddressResource(base_low, base_high), low, IR::Value(0u)};
@@ -526,10 +525,9 @@ bool Translator::BUFFER_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode
 	} else {
 		const IR::Value value =
 		    memory.data_dwords == 2u ? IR::Value(ReadU64(data_src)) : IR::Value(ReadU32(data_src));
-		result = ir.Emit(opcode,
-		                 {resource, address.index, address.offset, address.soffset, value,
-		                  ir.GetExec()},
-		                 flags);
+		result = ir.Emit(
+		    opcode, {resource, address.index, address.offset, address.soffset, value, ir.GetExec()},
+		    flags);
 	}
 	if (inst.glc) {
 		WriteOperand(inst.dst, result);
@@ -688,6 +686,18 @@ bool Translator::IMAGE_GATHER(const Decoder::Instruction& inst) {
 		WriteOperand(OffsetOperand(inst.dst, index),
 		             ir.Emit(IR::ValueOpcode::CompositeExtractU32x4, {result, IR::Value(index)}));
 	}
+	return true;
+}
+
+bool Translator::IMAGE_BVH(const Decoder::Instruction& inst) {
+	auto memory          = MemoryInfoFromDecoded(inst);
+	memory.planning_only = true;
+	// RDNA2 BVH traversal is not yet implemented; report a guaranteed miss so
+	// ray-tracing shaders can compile and the game can continue with rasterized
+	// fallback. The SPIR-V backend emits an invalid-hit sentinel (all 0xFFFFFFFF).
+	const auto result =
+	    ir.Emit(IR::ValueOpcode::ImageBvhIntersectRay, {}, AddMemoryInfo(memory, inst.pc));
+	WriteImageComponents(inst.dst, result, memory, 4u);
 	return true;
 }
 
@@ -1041,6 +1051,8 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::IMAGE_GATHER4_C_O:
 		case Decoder::Opcode::IMAGE_GATHER4_C_LZ_O:
 		case Decoder::Opcode::IMAGE_GATHER4H: return IMAGE_GATHER(inst);
+		case Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY:
+		case Decoder::Opcode::IMAGE_BVH64_INTERSECT_RAY: return IMAGE_BVH(inst);
 
 		case Decoder::Opcode::DS_MIN_F32:
 			return DS_MINMAX_F32(inst, IR::ValueOpcode::SharedAtomicFMin32);

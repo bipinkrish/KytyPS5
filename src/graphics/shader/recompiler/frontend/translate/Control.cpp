@@ -28,10 +28,10 @@ void Translator::S_SUBVECTOR_LOOP(const Decoder::Instruction& inst, bool begin) 
 	const auto hi    = ir.GetExecHi();
 	const auto saved = ReadU32(inst.dst);
 	if (begin) {
-		const auto low_active = ir.INotEqual(lo, zero);
+		const auto low_active        = ir.INotEqual(lo, zero);
 		instruction_branch_condition = ir.IEqual(ir.BitwiseOr(lo, hi), zero);
-		WriteRawU32(inst.dst, ir.Select(instruction_branch_condition, saved,
-		                               ir.Select(low_active, hi, lo)));
+		WriteRawU32(inst.dst,
+		            ir.Select(instruction_branch_condition, saved, ir.Select(low_active, hi, lo)));
 		// Keep the ISA assignment order: SDST may itself name an EXEC half.
 		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecHi),
 		            ir.Select(low_active, zero, ir.GetExecHi()));
@@ -41,8 +41,7 @@ void Translator::S_SUBVECTOR_LOOP(const Decoder::Instruction& inst, bool begin) 
 		    ir.LogicalAnd(ir.LogicalNot(high_active), ir.INotEqual(saved, zero));
 		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecHi),
 		            ir.Select(instruction_branch_condition, saved, hi));
-		WriteRawU32(inst.dst,
-		            ir.Select(instruction_branch_condition, lo, ReadU32(inst.dst)));
+		WriteRawU32(inst.dst, ir.Select(instruction_branch_condition, lo, ReadU32(inst.dst)));
 		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecLo),
 		            ir.Select(high_active, saved,
 		                      ir.Select(instruction_branch_condition, zero, ir.GetExecLo())));
@@ -57,7 +56,7 @@ void Translator::S_SAVEEXEC(const Decoder::Instruction& inst, IR::ValueOpcode op
 		const auto src = ReadU32(inst.src0);
 		const auto lhs = negate_exec ? ir.BitwiseNot(old) : old;
 		const auto rhs = negate_source ? ir.BitwiseNot(src) : src;
-		IR::U32 result;
+		IR::U32    result;
 		switch (operation) {
 			case IR::ValueOpcode::LogicalAnd: result = ir.BitwiseAnd(lhs, rhs); break;
 			case IR::ValueOpcode::LogicalOr: result = ir.BitwiseOr(lhs, rhs); break;
@@ -237,18 +236,53 @@ void Translator::S_GETPC_B64(const Decoder::Instruction& inst) {
 	WriteOperand(high, words[1]);
 }
 
+void Translator::S_SWAPPC_B64(const Decoder::Instruction& inst) {
+	// The CFG resolves the branch target structurally (like S_SETPC_B64); here
+	// only the return address (address of the next instruction) is written to
+	// the destination pair.
+	const auto base    = IR::U64(ir.Emit(IR::ValueOpcode::GetShaderBase));
+	const auto address = IR::U64(
+	    ir.Emit(IR::ValueOpcode::IAdd64, {base, IR::Value(static_cast<uint64_t>(inst.pc) + 4u)}));
+	if (inst.dst.kind == Decoder::OperandKind::Null) {
+		return;
+	}
+	auto high = PlainOperand(inst.dst);
+	switch (inst.dst.kind) {
+		case Decoder::OperandKind::Sgpr:
+			if (inst.dst.reg < 105u) {
+				high.reg++;
+			} else if (inst.dst.reg == 105u) {
+				high.kind = Decoder::OperandKind::VccLo;
+				high.reg  = 0u;
+			} else {
+				EXIT("S_SWAPPC_B64 destination does not name a valid scalar pair at pc 0x%08x",
+				     inst.pc);
+			}
+			break;
+		case Decoder::OperandKind::VccLo: high.kind = Decoder::OperandKind::VccHi; break;
+		case Decoder::OperandKind::M0: high.kind = Decoder::OperandKind::Null; break;
+		case Decoder::OperandKind::ExecLo: high.kind = Decoder::OperandKind::ExecHi; break;
+		default:
+			EXIT("S_SWAPPC_B64 destination does not name a valid scalar pair at pc 0x%08x",
+			     inst.pc);
+	}
+	const auto words = ExtractU64(address);
+	WriteOperand(inst.dst, words[0]);
+	WriteOperand(high, words[1]);
+}
+
 void Translator::S_CSELECT_B32(const Decoder::Instruction& inst) {
 	const auto result = ir.Select(ir.GetScc(), ReadU32(inst.src0), ReadU32(inst.src1));
 	WriteOperand(DestinationOperand(inst), result);
 }
 
 void Translator::ScalarSelect64(const Decoder::Instruction& inst,
-                                 const Decoder::Operand& false_source) {
+                                const Decoder::Operand&     false_source) {
 	const auto condition     = ir.GetScc();
 	const auto lhs           = ReadU32Pair(inst.src0);
 	const auto rhs           = ReadU32Pair(false_source);
-	const auto selected_mask = IR::U1(
-	    ir.Emit(IR::ValueOpcode::SelectU1, {condition, ReadMask(inst.src0), ReadMask(false_source)}));
+	const auto selected_mask = IR::U1(ir.Emit(
+	    IR::ValueOpcode::SelectU1, {condition, ReadMask(inst.src0), ReadMask(false_source)}));
 	const auto selected_mask_valid =
 	    IR::U1(ir.Emit(IR::ValueOpcode::SelectU1,
 	                   {condition, ReadMaskValid(inst.src0), ReadMaskValid(false_source)}));
@@ -277,13 +311,13 @@ void Translator::S_MOV_B64(const Decoder::Instruction& inst) {
 	const bool mask_source = inst.src0.kind == Decoder::OperandKind::Sgpr ||
 	                         inst.src0.kind == Decoder::OperandKind::ExecLo ||
 	                         inst.src0.kind == Decoder::OperandKind::VccLo;
-	IR::U1 source_mask;
-	IR::U1 source_mask_valid;
+	IR::U1     source_mask;
+	IR::U1     source_mask_valid;
 	if (mask_source) {
 		// A full VCC copy carries its predicate even in wave32; ReadMask also handles
 		// individual 32-bit VCC halves, which cannot preserve that provenance.
-		source_mask = inst.src0.kind == Decoder::OperandKind::VccLo ? ir.GetVcc()
-		                                                          : ReadMask(inst.src0);
+		source_mask =
+		    inst.src0.kind == Decoder::OperandKind::VccLo ? ir.GetVcc() : ReadMask(inst.src0);
 		source_mask_valid = ReadMaskValid(inst.src0);
 	}
 	// Preserve all 64 scalar bits independently of the per-thread predicate.
@@ -302,8 +336,8 @@ void Translator::S_MOV_B64(const Decoder::Instruction& inst) {
 }
 
 void Translator::S_WQM(const Decoder::Instruction& inst, bool wide) {
-	const auto source = wide ? ReadU64(inst.src0)
-	                         : ir.ConstructU64(ReadU32(inst.src0), IR::U32(IR::Value(0u)));
+	const auto source =
+	    wide ? ReadU64(inst.src0) : ir.ConstructU64(ReadU32(inst.src0), IR::U32(IR::Value(0u)));
 	const auto result = IR::U64(ir.Emit(IR::ValueOpcode::WqmU64, {source}));
 	if (!wide) {
 		const auto low = ir.CompositeExtract(result, 0);

@@ -104,7 +104,7 @@ uint32_t CubeLayer(EmitterState& state, uint32_t value) {
 uint32_t CoordF32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address,
                   uint32_t first, uint32_t components) {
 	const bool cube = ctx.state.program.info.images.at(mem.resource).cube;
-	auto x = AddressF32(ctx, mem, address, first);
+	auto       x    = AddressF32(ctx, mem, address, first);
 	if (components == 1u) return x;
 	auto y = mem.image_address_components > first + 1u ? AddressF32(ctx, mem, address, first + 1u)
 	                                                   : ZeroF32(ctx.state);
@@ -554,11 +554,11 @@ spv::Op ImageAtomicOpcode(IR::ValueOpcode opcode) {
 } // namespace
 
 void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
-	const auto op         = inst.GetOpcode();
-	const auto image_info = IR::ImageOpcodeInfoOf(op);
-	auto&       state     = ctx.state;
-	const auto& mem       = ctx.Memory(inst);
-	const auto  image_arg = inst.Arg(0);
+	const auto  op         = inst.GetOpcode();
+	const auto  image_info = IR::ImageOpcodeInfoOf(op);
+	auto&       state      = ctx.state;
+	const auto& mem        = ctx.Memory(inst);
+	const auto  image_arg  = inst.Arg(0);
 	ctx.ResourceIndex(image_arg, IR::ValueOpcode::GetImageResource);
 	const auto& image   = state.program.info.images.at(mem.resource);
 	const auto* address = ctx.ImageAddress(inst.Arg(image_info.needs_sampler ? 2 : 1));
@@ -793,8 +793,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		auto       low      = ConstantU32(state, 0u);
 		auto       high     = LoadMapping(mapping);
 		auto       selected = ConstantU32(state, 0u);
-		for (uint32_t iteration = 0; iteration < image.indirect_search_iterations;
-		     iteration++) {
+		for (uint32_t iteration = 0; iteration < image.indirect_search_iterations; iteration++) {
 			const auto active = Binary(state, spv::OpULessThan, TypeBool(state), low, high);
 			const auto mid    = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
 			                           Binary(state, spv::OpIAdd, TypeU32(state), low, high),
@@ -815,7 +814,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			const auto next_selected = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpSelect, TypeU32(state), next_selected, match,
 			                          candidate, selected);
-			selected              = next_selected;
+			selected        = next_selected;
 			const auto less = Binary(state, spv::OpULessThan, TypeBool(state), mapped_key, key);
 			const auto take_upper = Binary(state, spv::OpLogicalAnd, TypeBool(state), active, less);
 			const auto take_lower = Binary(state, spv::OpLogicalAnd, TypeBool(state), active,
@@ -884,6 +883,20 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	ctx.Fail(inst, "has no image SPIR-V emitter");
+}
+
+uint32_t EmitImageBvhIntersectRay(ValueEmitContext& ctx, const IR::Inst& inst) {
+	// RDNA2 BVH traversal stub: report a guaranteed miss with an invalid-hit
+	// sentinel. All 0xFFFFFFFF decodes as -1 (invalid node/triangle id) and as
+	// NaN (float hit distance), both of which fail hit tests and let traversal
+	// terminate without real acceleration-structure support.
+	(void)inst;
+	auto&      state  = ctx.state;
+	const auto miss   = ConstantU32(state, 0xffffffffu);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, miss,
+	                          miss, miss, miss);
+	return result;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter

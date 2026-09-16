@@ -74,7 +74,7 @@ struct DrawAutoArgs {
 };
 
 struct SubmitInfo {
-	static constexpr uint32_t MaxSemaphores = 3;
+	static constexpr uint32_t MaxSemaphores = 8;
 
 	std::array<vk::Semaphore, MaxSemaphores>          wait_semaphores {};
 	std::array<uint64_t, MaxSemaphores>               wait_ticks {};
@@ -109,8 +109,16 @@ public:
 
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
-	void BeginRendering(const RenderState& state) const;
-	void EndRendering() const;
+	// TEMP-DIAG-WORKCOUNT: per-submit host-work accounting so a hung submit names
+	// its actual contents (draws/dispatches/copies) instead of the stale label.
+	void                   CountDraw() { m_work_draws++; }
+	void                   CountDispatch() { m_work_dispatches++; }
+	void                   CountCopy() { m_work_copies++; }
+	[[nodiscard]] uint32_t WorkDraws() const { return m_work_draws; }
+	[[nodiscard]] uint32_t WorkDispatches() const { return m_work_dispatches; }
+	[[nodiscard]] uint32_t WorkCopies() const { return m_work_copies; }
+	void                   BeginRendering(const RenderState& state) const;
+	void                   EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
@@ -140,6 +148,9 @@ private:
 	uint32_t            m_debug_arg2      = 0;
 	uint32_t            m_debug_arg3      = 0;
 	uint64_t            m_debug_arg4      = 0;
+	uint32_t            m_work_draws      = 0;
+	uint32_t            m_work_dispatches = 0;
+	uint32_t            m_work_copies     = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	HW::Context*        m_registers   = nullptr;
@@ -176,34 +187,35 @@ private:
 
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
-	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
-	                             std::span<RenderColorInfo> colors);
+	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
+	                                                     std::span<RenderColorInfo>         colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
-	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer,
-	                                          const DrawCallInfo& draw,
-	                                          uint32_t            render_target_slice_offset,
+	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
 	                         bool primitive_restart_enable);
-	[[nodiscard]] RenderState AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
-	                                               uint32_t color_count, RenderDepthInfo& depth,
-	                                               const std::optional<PreparedBindings>& pixel = std::nullopt);
-	[[nodiscard]] bool        ResolveColorTargets(CommandBuffer& buffer,
-	                                              uint32_t render_target_slice_offset);
-	void                      BindImage(ImageId id, bool storage);
-	void                      BindRenderTarget(ImageId id);
-	void                      ResetBindings();
-	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-	                                                     const CommandBuffer&          buffer);
+	[[nodiscard]] RenderState
+	AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors, uint32_t color_count,
+	                     RenderDepthInfo&                       depth,
+	                     const std::optional<PreparedBindings>& pixel = std::nullopt);
+	[[nodiscard]] bool ResolveColorTargets(CommandBuffer& buffer,
+	                                       uint32_t       render_target_slice_offset);
+	void               BindImage(ImageId id, bool storage);
+	void               BindRenderTarget(ImageId id);
+	void               ResetBindings();
+	[[nodiscard]] bool TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
+	                                              const CommandBuffer&          buffer);
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
-	                                              CommandBuffer& command, uint32_t group_x,
-	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
+	                                               CommandBuffer& command, uint32_t group_x,
+	                                               uint32_t group_y, uint32_t group_z,
+	                                               uint32_t mode);
 
 	RenderContext&                        m_context;
 	std::vector<ImageId>                  m_bound_images;

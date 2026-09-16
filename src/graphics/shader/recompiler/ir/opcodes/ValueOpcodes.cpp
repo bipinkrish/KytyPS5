@@ -92,7 +92,8 @@ bool HasSideEffects(ValueOpcode opcode) {
 		case ValueOpcode::SetAttribute:
 		case ValueOpcode::SetTessellationAttribute:
 		case ValueOpcode::MeshAllocate:
-		case ValueOpcode::Barrier: return true;
+		case ValueOpcode::Barrier:
+		case ValueOpcode::ImageBvhIntersectRay: return true;
 		default: return false;
 	}
 }

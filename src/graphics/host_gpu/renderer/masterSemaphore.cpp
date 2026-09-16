@@ -2,6 +2,9 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/commandScheduler.h"
+
+#include <execinfo.h>
 
 namespace Libs::Graphics {
 
@@ -49,8 +52,40 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	for (int i = 1;; i++) {
+		const auto result = m_graphics.device.waitSemaphores(&wait_info, 1000000000ULL); // 1s
+		if (result == vk::Result::eSuccess) {
+			break;
+		}
+		if (result == vk::Result::eTimeout) {
+			uint64_t current_val = 0;
+			(void)m_graphics.device.getSemaphoreCounterValue(m_semaphore, &current_val);
+			LOGF("[MasterSemaphore::Wait] TIMEOUT (%d s) waiting for tick=%" PRIu64
+			     ", counter=%" PRIu64 "\n",
+			     i, tick, current_val);
+			std::printf("[MasterSemaphore::Wait] TIMEOUT (%d s) waiting for tick=%" PRIu64
+			            ", counter=%" PRIu64 "\n",
+			            i, tick, current_val);
+			std::fflush(stdout);
+			if (i == 1) {
+				void* callstack[32];
+				int   frames = backtrace(callstack, 32);
+				std::printf("=== MasterSemaphore::Wait CALLSTACK ===\n");
+				backtrace_symbols_fd(callstack, frames, fileno(stdout));
+				DumpRecentSubmits();
+			}
+			// TEMP-DIAG-LONGWAIT: 300 s watchdog to distinguish very-slow
+			// dispatches (27k-group ballot loops) from infinite ones.
+			if (i >= 300) {
+				EXIT("[MasterSemaphore::Wait] GPU hang: timed out after %d s waiting for "
+				     "tick=%" PRIu64 "\n",
+				     i, tick);
+			}
+			continue;
+		}
+		EXIT("[MasterSemaphore::Wait] waitSemaphores returned error: %d\n",
+		     static_cast<int>(result));
+	}
 	Refresh();
 }
 

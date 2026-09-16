@@ -4,8 +4,10 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <unordered_map>
@@ -323,9 +325,8 @@ public:
 						                        (op == ValueOpcode::ReadConstBuffer &&
 						                         kind == ResourceKind::ScalarAddress);
 						if (crosswired) {
-							Fail(flags.pc,
-							     fmt::format("{} has incompatible scalar memory metadata",
-							                 ValueOpcodeName(op)));
+							Fail(flags.pc, fmt::format("{} has incompatible scalar memory metadata",
+							                           ValueOpcodeName(op)));
 						}
 					}
 				}
@@ -508,10 +509,17 @@ private:
 			return false;
 		}
 		m_visiting.push_back(inst);
-		uint64_t out = 0;
+		uint64_t   out       = 0;
 		const bool evaluated = EvaluateInst(*inst, out);
 		m_visiting.pop_back();
 		if (!evaluated) {
+			static std::atomic<uint32_t> eval_fail_count {0};
+			if (eval_fail_count.fetch_add(1) < 20) {
+				std::printf("EVAL-FAIL: opcode=%s (%u) num_args=%zu\n",
+				            std::string(ValueOpcodeName(inst->GetOpcode())).c_str(),
+				            static_cast<uint32_t>(inst->GetOpcode()), inst->NumArgs());
+				std::fflush(stdout);
+			}
 			return false;
 		}
 		m_cache.emplace(inst, out);
@@ -616,6 +624,16 @@ private:
 		uint32_t word = 0;
 		if (m_runtime.read_memory != nullptr) {
 			if (!m_runtime.read_memory(m_runtime.userdata, address, &word)) {
+				static std::atomic<uint32_t> raw_fail_count {0};
+				if (raw_fail_count.fetch_add(1) < 16) {
+					std::printf("EVAL-RAW-FAIL: read_memory failed addr=0x%llx (base=0x%llx "
+					            "imm=%lld off=%llu)\n",
+					            static_cast<unsigned long long>(address),
+					            static_cast<unsigned long long>(base),
+					            static_cast<long long>(immediate),
+					            static_cast<unsigned long long>(offset));
+					std::fflush(stdout);
+				}
 				return false;
 			}
 		} else {
@@ -951,7 +969,16 @@ private:
 			case ValueOpcode::UndefU16:
 			case ValueOpcode::UndefU32:
 			case ValueOpcode::UndefU64: return false;
-			default: break;
+			default: {
+				static std::atomic<uint32_t> unhandled_count {0};
+				if (unhandled_count.fetch_add(1) < 16) {
+					std::printf("EVAL-UNHANDLED: opcode=%s (%u) num_args=%zu\n",
+					            std::string(ValueOpcodeName(inst.GetOpcode())).c_str(),
+					            static_cast<uint32_t>(inst.GetOpcode()), inst.NumArgs());
+					std::fflush(stdout);
+				}
+				break;
+			}
 		}
 		return false;
 	}
@@ -977,12 +1004,24 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
                                 const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
                                 std::vector<uint32_t>& flat, bool evaluate_flat,
                                 std::span<const uint8_t> clean_flat_slots,
-                                std::vector<uint8_t>& active_sources) {
+                                std::vector<uint8_t>&    active_sources) {
 	if (!program.srt_plan_complete) {
+		static std::atomic<uint32_t> c {0};
+		if (c.fetch_add(1) < 8) {
+			std::printf("MATFAIL-EVAL: srt_plan_complete is false (hash=0x%016llx)\n",
+			            static_cast<unsigned long long>(program.shader_hash));
+			std::fflush(stdout);
+		}
 		return false;
 	}
 	if (std::ranges::any_of(clean_flat_slots, [](uint8_t clean) { return clean != 0u; }) &&
 	    runtime.read_specialization_memory == nullptr) {
+		static std::atomic<uint32_t> c {0};
+		if (c.fetch_add(1) < 8) {
+			std::printf("MATFAIL-EVAL: clean_reader_missing (hash=0x%016llx)\n",
+			            static_cast<unsigned long long>(program.shader_hash));
+			std::fflush(stdout);
+		}
 		return false;
 	}
 	SrtRuntime clean_runtime  = runtime;
@@ -1027,6 +1066,12 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 	for (const auto source_index: sources) {
 		const auto* source = Source(program, source_index);
 		if (source == nullptr) {
+			static std::atomic<uint32_t> c {0};
+			if (c.fetch_add(1) < 8) {
+				std::printf("MATFAIL-EVAL: null source_index=%u total=%zu\n", source_index,
+				            program.descriptor_sources.size());
+				std::fflush(stdout);
+			}
 			return false;
 		}
 		DescriptorValue value;
@@ -1034,6 +1079,13 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 		if (!evaluate_flat || active[source_index]) {
 			for (uint32_t index = 0; index < source->dword_count; index++) {
 				if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
+					static std::atomic<uint32_t> c {0};
+					if (c.fetch_add(1) < 16) {
+						std::printf("MATFAIL-SRC: source=%u dword=%u/%u hash=0x%016llx\n",
+						            source_index, index, source->dword_count,
+						            static_cast<unsigned long long>(program.shader_hash));
+						std::fflush(stdout);
+					}
 					return false;
 				}
 			}
@@ -1049,11 +1101,18 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			auto&      selected = clean ? clean_evaluator : evaluator;
 			if (read.flat_offset >= flattened.size() ||
 			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
+				static std::atomic<uint32_t> c {0};
+				if (c.fetch_add(1) < 16) {
+					std::printf("MATFAIL-FLAT: flat_offset=%u flattened_size=%zu hash=0x%016llx\n",
+					            read.flat_offset, flattened.size(),
+					            static_cast<unsigned long long>(program.shader_hash));
+					std::fflush(stdout);
+				}
 				return false;
 			}
 		}
 	}
-	results = std::move(evaluated);
+	results        = std::move(evaluated);
 	active_sources = std::move(active);
 	if (evaluate_flat) {
 		flat = std::move(flattened);
@@ -1077,11 +1136,11 @@ void BuildSrtPlan(Program& program) {
 }
 
 bool EvaluateUniformValues(const ResourcePlan& program, std::span<const Value> values,
-                            const SrtRuntime& runtime, std::span<uint32_t> results) {
+                           const SrtRuntime& runtime, std::span<uint32_t> results) {
 	if (values.size() != results.size()) {
 		return false;
 	}
-	auto clean = runtime;
+	auto clean        = runtime;
 	clean.read_memory = runtime.read_specialization_memory != nullptr
 	                        ? runtime.read_specialization_memory
 	                        : +[](void*, uint64_t, uint32_t*) { return false; };

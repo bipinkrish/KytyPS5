@@ -159,16 +159,14 @@ constexpr MimgSampleInfo MIMG_SAMPLE_OPCODE_LIST[] = {
     {0xb5u, "image_sample_b_o_a",
      ImageSampleFlagBias | ImageSampleFlagOffset | ImageSampleFlagAdjust},
     {0xb6u, "image_sample_b_cl_o_a",
-     ImageSampleFlagBias | ImageSampleFlagLodClamp | ImageSampleFlagOffset |
-         ImageSampleFlagAdjust},
+     ImageSampleFlagBias | ImageSampleFlagLodClamp | ImageSampleFlagOffset | ImageSampleFlagAdjust},
     {0xb8u, "image_sample_c_o_a",
      ImageSampleFlagCompare | ImageSampleFlagOffset | ImageSampleFlagAdjust},
     {0xb9u, "image_sample_c_cl_o_a",
      ImageSampleFlagCompare | ImageSampleFlagLodClamp | ImageSampleFlagOffset |
          ImageSampleFlagAdjust},
     {0xbdu, "image_sample_c_b_o_a",
-     ImageSampleFlagCompare | ImageSampleFlagBias | ImageSampleFlagOffset |
-         ImageSampleFlagAdjust},
+     ImageSampleFlagCompare | ImageSampleFlagBias | ImageSampleFlagOffset | ImageSampleFlagAdjust},
     {0xbeu, "image_sample_c_b_cl_o_a",
      ImageSampleFlagCompare | ImageSampleFlagBias | ImageSampleFlagLodClamp |
          ImageSampleFlagOffset | ImageSampleFlagAdjust},
@@ -177,24 +175,18 @@ constexpr MimgSampleInfo MIMG_SAMPLE_OPCODE_LIST[] = {
 constexpr MimgGatherInfo MIMG_GATHER_OPCODE_LIST[] = {
     {0x47u, Opcode::IMAGE_GATHER4_LZ, ImageSampleFlagLevelZero},
     {0x48u, Opcode::IMAGE_GATHER4_C, ImageSampleFlagCompare},
-    {0x4fu, Opcode::IMAGE_GATHER4_C_LZ,
-     ImageSampleFlagCompare | ImageSampleFlagLevelZero},
-    {0x57u, Opcode::IMAGE_GATHER4_LZ_O,
-     ImageSampleFlagLevelZero | ImageSampleFlagOffset},
-    {0x58u, Opcode::IMAGE_GATHER4_C_O,
-     ImageSampleFlagCompare | ImageSampleFlagOffset},
+    {0x4fu, Opcode::IMAGE_GATHER4_C_LZ, ImageSampleFlagCompare | ImageSampleFlagLevelZero},
+    {0x57u, Opcode::IMAGE_GATHER4_LZ_O, ImageSampleFlagLevelZero | ImageSampleFlagOffset},
+    {0x58u, Opcode::IMAGE_GATHER4_C_O, ImageSampleFlagCompare | ImageSampleFlagOffset},
     {0x5fu, Opcode::IMAGE_GATHER4_C_LZ_O,
      ImageSampleFlagCompare | ImageSampleFlagLevelZero | ImageSampleFlagOffset},
     {0x61u, Opcode::IMAGE_GATHER4H, ImageSampleFlagGatherHorizontal},
 };
 
 constexpr Detail::OpcodeMap MIMG_ATOMIC_OPCODE_LIST[] = {
-    {0x0fu, Opcode::IMAGE_ATOMIC_SWAP},
-    {0x11u, Opcode::IMAGE_ATOMIC_ADD},
-    {0x15u, Opcode::IMAGE_ATOMIC_UMIN},
-    {0x17u, Opcode::IMAGE_ATOMIC_UMAX},
-    {0x18u, Opcode::IMAGE_ATOMIC_AND},
-    {0x19u, Opcode::IMAGE_ATOMIC_OR},
+    {0x0fu, Opcode::IMAGE_ATOMIC_SWAP}, {0x11u, Opcode::IMAGE_ATOMIC_ADD},
+    {0x15u, Opcode::IMAGE_ATOMIC_UMIN}, {0x17u, Opcode::IMAGE_ATOMIC_UMAX},
+    {0x18u, Opcode::IMAGE_ATOMIC_AND},  {0x19u, Opcode::IMAGE_ATOMIC_OR},
     {0x1au, Opcode::IMAGE_ATOMIC_XOR},
 };
 
@@ -233,6 +225,8 @@ Opcode DecodeMimgOpcode(uint32_t opcode, const MimgSampleInfo* sample, const Mim
 		case 0x09u: return Opcode::IMAGE_STORE_MIP;
 		case 0x0eu: return Opcode::IMAGE_GET_RESINFO;
 		case 0x60u: return Opcode::IMAGE_GET_LOD;
+		case 0xe6u: return Opcode::IMAGE_BVH_INTERSECT_RAY;
+		case 0xe7u: return Opcode::IMAGE_BVH64_INTERSECT_RAY;
 		default: return Opcode::UNSUPPORTED;
 	}
 }
@@ -358,6 +352,18 @@ void DecodeMimg(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	}
 	inst.image_address_components =
 	    DecodeMimgAddressComponents(opcode, dimension, sample, gather, atomic);
+	if (opcode == 0xe6u || opcode == 0xe7u) {
+		// RDNA2 ray-tracing BVH traversal (image_bvh_intersect_ray / image_bvh64).
+		// vdata is always 4 dwords (128-bit hit result), dmask is 0xf.
+		// vaddr holds ray + node data: 11 dwords (32-bit node) or 12 (64-bit node),
+		// 8/9 dwords with A16 packed addresses. The recompiler currently stubs
+		// these as a guaranteed miss, so addresses are informational only.
+		const bool is64               = (opcode == 0xe7u);
+		inst.data_components          = 4u;
+		inst.data_dwords              = 4u;
+		inst.data_bits                = 32u;
+		inst.image_address_components = is64 ? (a16 ? 9u : 12u) : (a16 ? 8u : 11u);
+	}
 	SetRawWords(inst, code, word_index, word_count);
 
 	if (inst.opcode == Opcode::UNSUPPORTED) {

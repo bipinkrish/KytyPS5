@@ -284,6 +284,10 @@ VALUE_OPCODE(ImageAtomicUMax32, U32, ImageResource, ImageAddress, U32, U1)
 VALUE_OPCODE(ImageAtomicAnd32, U32, ImageResource, ImageAddress, U32, U1)
 VALUE_OPCODE(ImageAtomicOr32, U32, ImageResource, ImageAddress, U32, U1)
 VALUE_OPCODE(ImageAtomicXor32, U32, ImageResource, ImageAddress, U32, U1)
+// RDNA2 ray-tracing BVH traversal (MIMG 0xE6/0xE7). Currently stubbed as a
+// guaranteed miss; takes no resource/address args so no descriptor tracking
+// is required until real traversal is implemented.
+VALUE_OPCODE(ImageBvhIntersectRay, U32x4)
 VALUE_OPCODE(GetAttribute, U32, U32, U32)
 VALUE_OPCODE(GetInterpolationParameter, U32, U32, U32, U32)
 VALUE_OPCODE(SetAttribute, Void, U32x4, U1)
