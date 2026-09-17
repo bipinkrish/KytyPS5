@@ -36,6 +36,30 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+namespace {
+
+// Workaround for compute shaders implementing single-pass decoupled look-back prefix sums.
+// On Vulkan devices where concurrent workgroup count is bounded by physical SM/CU occupancy
+// (e.g. NVIDIA 36 SMs), workgroups spinning for predecessor tiles deadlock when dispatch
+// size exceeds device occupancy. Clamping group count prevents the spinlock until cooperative
+// dispatch or bounded-poll emulation is implemented.
+[[nodiscard]] constexpr bool IsOccupancyDeadlockShader(uint64_t hash) noexcept {
+	constexpr uint64_t kDeadlockShaderHashes[] = {
+	    0xdc720ea9efec7946ULL, // Ghostrunner tile prefix sum
+	    0x600a4464295efa6aULL, // Ghostrunner work distribution
+	    0xd057bd7084a4492aULL, // Ghostrunner RT traversal megadispatch
+	};
+	for (const auto h: kDeadlockShaderHashes) {
+		if (h == hash) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -264,19 +288,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = input_info.stage.resources;
 
-	if ((program.shader_hash == 0xd057bd7084a4492au ||
-	     program.shader_hash == 0xdc720ea9efec7946ULL ||
-	     program.shader_hash == 0x600a4464295efa6aULL) &&
-	    (thread_group_x > 1u || thread_group_y > 1u || thread_group_z > 1u)) {
-		static std::atomic<uint32_t> clamp_log_count {0};
-		if (clamp_log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
-			std::printf("DISPATCH-DIAG: clamping hash=0x%016llx dispatch %ux%ux%u -> 1x1x1 "
-			            "(submit_id=%llu)\n",
-			            static_cast<unsigned long long>(program.shader_hash),
-			            thread_group_x, thread_group_y, thread_group_z,
-			            static_cast<unsigned long long>(submit_id));
-			std::fflush(stdout);
-		}
+	if (IsOccupancyDeadlockShader(program.shader_hash)) {
 		thread_group_x = thread_group_y = thread_group_z = 1u;
 	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
