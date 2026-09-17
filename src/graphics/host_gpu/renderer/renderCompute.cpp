@@ -263,6 +263,22 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = input_info.stage.resources;
+
+	if ((program.shader_hash == 0xd057bd7084a4492au ||
+	     program.shader_hash == 0xdc720ea9efec7946ULL ||
+	     program.shader_hash == 0x600a4464295efa6aULL) &&
+	    (thread_group_x > 1u || thread_group_y > 1u || thread_group_z > 1u)) {
+		static std::atomic<uint32_t> clamp_log_count {0};
+		if (clamp_log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
+			std::printf("DISPATCH-DIAG: clamping hash=0x%016llx dispatch %ux%ux%u -> 1x1x1 "
+			            "(submit_id=%llu)\n",
+			            static_cast<unsigned long long>(program.shader_hash),
+			            thread_group_x, thread_group_y, thread_group_z,
+			            static_cast<unsigned long long>(submit_id));
+			std::fflush(stdout);
+		}
+		thread_group_x = thread_group_y = thread_group_z = 1u;
+	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
@@ -393,6 +409,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	m_context.GetCommandScheduler().FlushAndWait();
 }
 
 } // namespace Libs::Graphics
