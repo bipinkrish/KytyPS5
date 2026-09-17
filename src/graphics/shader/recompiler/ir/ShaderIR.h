@@ -444,6 +444,7 @@ struct ShaderInfo {
 	int32_t                          instance_offset_sgpr = -1;
 	bool                             has_bitwise_xor    = false;
 	bool                             uses_dma           = false;
+	bool                             has_inter_workgroup_spinloop = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };

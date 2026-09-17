@@ -413,6 +413,16 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 			    return inst.GetOpcode() == ValueOpcode::BitwiseXor32;
 		    });
 	    });
+	if (program.stage == ShaderType::Compute) {
+		const bool has_loops =
+		    std::any_of(program.block_info.begin(), program.block_info.end(),
+		                [](const auto& bi) { return bi.terminator.loop_header; });
+		if (has_loops) {
+			next.has_inter_workgroup_spinloop =
+			    std::any_of(program.memory_info.begin(), program.memory_info.end(),
+			                [](const auto& mem) { return mem.glc; });
+		}
+	}
 	switch (program.stage) {
 		case ShaderType::Vertex:
 		case ShaderType::Local: CollectVertexInputs(program, input_info.vertex, next); break;

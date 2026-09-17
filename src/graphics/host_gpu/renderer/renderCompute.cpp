@@ -27,7 +27,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include "graphics/host_gpu/renderer/pipeline/computeShaderQuirks.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -266,9 +265,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = input_info.stage.resources;
 
-	if (ShouldClampComputeWorkgroups(program.shader_hash)) {
-		thread_group_x = thread_group_y = thread_group_z = 1u;
-	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
@@ -394,7 +390,18 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	const uint32_t batch_size = program.info.has_inter_workgroup_spinloop ? 16u : 0u;
+	if (batch_size > 0 && thread_group_x > batch_size) {
+		for (uint32_t base = 0; base < thread_group_x; base += batch_size) {
+			const uint32_t count = std::min(batch_size, thread_group_x - base);
+			vk_buffer.dispatch(count, thread_group_y, thread_group_z);
+			if (base + count < thread_group_x) {
+				ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+			}
+		}
+	} else {
+		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
