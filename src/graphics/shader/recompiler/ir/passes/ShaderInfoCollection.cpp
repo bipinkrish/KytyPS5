@@ -362,7 +362,8 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 						const auto output = DecodePositionExportComponent(
 						    input_info.vertex->pa_cl_vs_out_cntl, export_info.index, component);
 						if (output.viewport) {
-							AddOutput(info, StageOutputKind::ViewportIndex, 0, 0, "gl_ViewportIndex");
+							AddOutput(info, StageOutputKind::ViewportIndex, 0, 0,
+							          "gl_ViewportIndex");
 						}
 						if (output.point_size) {
 							AddOutput(info, StageOutputKind::PointSize, 0, 0, "gl_PointSize");
@@ -413,6 +414,16 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 			    return inst.GetOpcode() == ValueOpcode::BitwiseXor32;
 		    });
 	    });
+	if (program.stage == ShaderType::Compute) {
+		const bool has_loops =
+		    std::any_of(program.block_info.begin(), program.block_info.end(),
+		                [](const auto& bi) { return bi.terminator.loop_header; });
+		if (has_loops) {
+			next.has_inter_workgroup_spinloop =
+			    std::any_of(program.memory_info.begin(), program.memory_info.end(),
+			                [](const auto& mem) { return mem.glc; });
+		}
+	}
 	switch (program.stage) {
 		case ShaderType::Vertex:
 		case ShaderType::Local: CollectVertexInputs(program, input_info.vertex, next); break;
